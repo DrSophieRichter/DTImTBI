@@ -1,0 +1,145 @@
+---
+title: "DTI_mildTBI"
+author: "Sophie"
+date: "2022-11-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(table1)
+library(flextable)
+source("DTI_mTBI_funs.R")
+
+```
+
+
+```{r}
+data <- read.csv("Data/CENTER_clinical_data.csv")
+data <- 
+  data %>%
+  filter(PatientType != "control") %>%
+  drop_na(Recovery) %>%
+  select(Scan_ID, Recovery, contains("MR_"))
+colnames(data)
+```
+```{r}
+#see if I can fill in missings
+#E02157 has a normal MRI
+temp <- data %>% filter(Scan_ID == "E02157")
+temp[is.na(temp)] <- "absent"
+data <- data %>% filter(Scan_ID != "E02157")
+data <- bind_rows(data, temp)
+#There are two "indeteminate" contusions, on re-review decided to be absent
+data$MR_Contusion[data$MR_Contusion == "indeteminate"] <- "absent"
+
+```
+
+```{r}
+#combine subdural categories
+data$MR_SDH_any <- ifelse(data$MR_SDH_acute == "present" |
+                            data$MR_SDH_mixed == "present" |
+                            data$MR_SDH_notacute == "present",
+                          "present", "absent")
+summary(as.factor(data$MR_SDH_acute))
+data %>% filter(is.na(data$MR_SDH_acute))
+```
+
+
+```{r}
+#abnormality, no(%) recovered, no(%) not recovered, OR (conf interval)
+#qsquare/Fisher exact, then FDR
+mycol <- "MR_abnormality"
+
+get_or <- function(data, mycol){
+  f <- fisher.test(as.matrix(table(data[,mycol], data[,"Recovery"])))
+or <- format(round(f$estimate[[1]], 2), nsmall = 2)
+ll <- format(round(f$conf.int[[1]], 2), nsmall = 2)
+ul <- format(round(f$conf.int[[2]], 2), nsmall = 2)
+res <- paste0(or, " (", ll, "-", ul, ")")
+return(res)
+}
+
+data <- 
+  data %>% 
+  select(Recovery,
+         MR_abnormality,MR_TAI, MR_SDH_any, MR_SAH, MR_Contusion,MR_IVH,MR_Cistern,MR_Mids,MR_EDH)
+
+data[data == "absent"] <- 0
+data[data == "present"] <- 1
+
+cols.num <- colnames(data[-1])
+data[cols.num] <- sapply(data[cols.num],as.numeric)
+sapply(data, class)
+
+summary(factor(data$Recovery))
+
+data_c <- data %>% filter(Recovery == "complete")
+count_c <- as.data.frame(colSums(data_c[-1]))
+names(count_c) <- "count"
+count_c$perc <- round(count_c$count/79*100, 0)
+count_c$complete <- paste0(count_c$count, " (", count_c$perc, "%)")
+count_c <- count_c %>% select(-c(count, perc))
+count_c
+
+data_i <- data %>% filter(Recovery == "incomplete")
+count_i <- as.data.frame(colSums(data_i[-1]))
+names(count_i) <- "count"
+count_i$perc <- round(count_i$count/70*100, 0)
+count_i$incomplete <- paste0(count_i$count, " (", count_i$perc, "%)")
+count_i <- count_i %>% select(-c(count, perc))
+count_i
+
+count <- bind_cols(count_c, count_i)
+count$or <- NA
+count
+
+for (i in 1:7){
+  count[i, "or"] <- get_or(data, rownames(count)[i])
+}
+
+
+count$abn <- rownames(count)
+count[count == "MR_abnormality"] <- "any abnormality"
+count[count == "MR_TAI"] <- "petechial haemorrhage"
+count[count == "MR_SDH_any"] <- "subdural haemorrhage"
+count[count == "MR_SAH"] <- "subarachnoid haemorrhage"
+count[count == "MR_Contusion"] <- "contusion"
+count[count == "MR_IVH"] <- "intraventricular hemorrhage"
+count[count == "MR_Cistern"] <- "cisternal compression"
+count[count == "MR_Mids"] <- "midline shift"
+count[count == "MR_EDH"] <- "extradural hemorrhage"
+count <- 
+  count %>%
+  select(abn, everything())
+count
+```
+
+
+```{r}
+ft <- count %>%
+  regulartable() %>%
+  set_header_labels("or" = "OR (95% CI)",
+                    "abn" = "MRI abnormality",
+                    "complete" = "complete\ n=79",
+                    "incomplete" = "incomplete\ n=70") %>%
+  add_header_row(values = c("", "Recovery", ""), colwidths = c(1, 2, 1)) %>%
+  align(align = "right", part = "all")%>%
+    align(align = "center", part = "header", i = c(1)) %>%
+    align(align = "left", j = c(1), part = "all") %>% 
+    padding(padding = 0, part = "all", padding.right = 3, padding.left = 3, padding.top = 3, padding.bottom = 3) %>%
+    fontsize(size = 10, part = "all")
+
+save_as_docx(ft, path = "Figures/MRI_reports.docx")
+
+
+```
+
+
+

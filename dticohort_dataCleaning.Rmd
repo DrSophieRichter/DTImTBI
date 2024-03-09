@@ -1,0 +1,688 @@
+---
+title: "DTI_mildTBI"
+author: "Sophie"
+date: "2022-11-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(table1)
+library(flextable)
+source("DTI_mTBI_funs.R")
+
+```
+
+
+
+```{r}
+#########################
+#load imaging data
+#########################
+
+#load dti names
+dtinames <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/Trajectory_paper/Raw_data/JHU_updated/Atlas_Oct_2021_JHU_Extra_FINAL_Sophie.csv")
+dtinames$ROI_num <- paste0("ROI_", dtinames$ROI_num)
+
+nonwm <-
+  dtinames %>%
+  filter(!(Atlas %in% c("JHU")))
+nonwm <- nonwm$ROI_num
+
+#jhu fa --> only CENTER-TBI sequences
+fa <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/Trajectory_paper/Raw_data/JHU_updated/fa_jhu_all_20220823.csv") %>%
+  filter(str_detect(Series, "proc_set")) %>%
+  select(-X,
+         -all_of(nonwm)) %>% #only use original JHU ROIs
+  group_by(Scan_ID, Series) %>%
+  slice(1) %>% #remove duplicates
+  ungroup()
+colnames(fa) <- gsub("ROI", "FA_ROI", colnames(fa), fixed = TRUE)
+
+#jhu md --> only CENTER-TBI sequences
+md <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/Trajectory_paper/Raw_data/JHU_updated/md_jhu_all_20220823.csv") %>%
+  filter(str_detect(Series, "proc_set")) %>%
+  select(-X,
+        -all_of(nonwm)) %>% #only use original JHU ROIs
+  group_by(Scan_ID, Series) %>%
+  slice(1) %>% #remove duplicates
+  ungroup()
+colnames(md) <- gsub("ROI", "MD_ROI", colnames(md), fixed = TRUE)
+
+#qc data
+qc1 <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/Trajectory_paper/Analysis_Aug2021/Current_data/Check_these_scans_1.csv") %>%
+  select(Scan_ID, Decision)
+qc2 <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/Trajectory_paper/Analysis_Aug2021/Current_data/Check_these_scans_2.csv") %>%
+  select(Scan_ID, Decision)
+qc3 <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/Trajectory_paper/Analysis_Aug2021/Current_data/Check_these_scans_3.csv") %>%
+  select(Scan_ID, Decision)
+qc_all <- 
+  bind_rows(qc1, qc2, qc2) %>%
+  group_by(Scan_ID) %>%
+  slice(1)
+```
+```{r}
+#################################
+# load control data
+#################################
+
+#Scan metadata
+scans <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/Legacy_data/Most_uptodate_curated_data/Sophies_scan_database_20220822.csv", na.strings = c("", " ", "NA"))
+con <- 
+  scans %>%
+  select(subjectId = Master_subject_ID, 
+         Scan_ID, 
+         Category, 
+         Site, 
+         Model, 
+         Age_at_this_scan) %>%
+  filter(Category == "HEALTHY" & Scan_ID %in% fa$Scan_ID) %>%
+  group_by(subjectId) %>%
+  slice(1) %>%
+  ungroup()
+
+#demographics
+demog <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/Legacy_data/Most_uptodate_curated_data/Sophies_clinical_database_20220822.csv", na.strings = c("", " ", "NA"))
+demog <- 
+  demog %>%
+  select(subjectId = Master_subject_ID,
+         Sex,
+         Education)
+con <- merge(con, demog, by = "subjectId", all.x = TRUE, all.y = FALSE)
+
+#only those with DTI
+con <-
+  con %>%
+  filter(Scan_ID %in% fa$Scan_ID)
+
+#QC of control scans
+con <- merge(con, qc_all, by = "Scan_ID", all.x = TRUE, all.y = FALSE)
+summary(as.factor(con$Decision)) #all ok to keep
+```
+
+```{r}
+##################################
+#load clinical data for patients
+##################################
+
+#neurobot clinical data - volume 1
+pat <- 
+  read.csv("Data/Clinical_data_vol1.csv", na.strings = c("", " ", "NA", "88")) %>%
+  select(-c(InjuryHx.InjMech, Subject.EduLvlUSATyp)) #I will use variables standardised with control data instead
+
+colnames(pat) <- gsub("InjuryHx.", "", colnames(pat), fixed = TRUE)
+colnames(pat) <- gsub("Subject.", "", colnames(pat), fixed = TRUE)
+colnames(pat) <- gsub("MedHx.", "", colnames(pat), fixed = TRUE)
+
+pat$Severity <- ifelse(pat$GCSScoreBaselineDerived > 12, "mild", "moderate-severe")
+pat$Recovery <- ifelse(pat$GOSE3monthEndpointDerived > 7, "complete", "incomplete")
+pat$LOCPTADuration <- ifelse(pat$LOCPTADuration == "88" | is.na(pat$LOCLossOfConsciousness)==TRUE, NA,
+                             ifelse(pat$LOCPTADuration %in% c("0", "2"), "absent", "present"))
+
+
+pat$MajorEI <- ifelse(pat$PelvicGirdleAIS >= 3 |
+                          pat$UpperExtremitiesAIS >= 3 |
+                          pat$ThoracicSpineAIS >= 3 |
+                          pat$AbdomenPelvicContentsAIS >= 3 |
+                          pat$ExternaAIS >= 3 |
+                          pat$ThoraxChestAIS >= 3 |
+                          pat$LumbarSpineAIS >= 3 |
+                          pat$LowerExtremitiesAIS >= 3, "present", "absent")
+
+
+
+
+#neurobot clinical data - volume 2
+temp <- 
+  read.csv("Data/Clinical_data_vol2.csv", na.strings = c("", " ", "NA", "88"))
+
+colnames(temp)
+```
+
+
+```{r}
+colnames(temp) <- gsub("MedHx.", "", colnames(temp), fixed = TRUE)
+
+pat <- merge(pat, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+
+mycols <- c("MedHxPsychiatric", 
+            "MedHxPsychiatricDep",
+            "MedHxPsychiatricAnx",
+            "MedHxPsychiatricOther",
+            "MedHxPsychiatricSchiz",
+            "MedHxPsychiatricSleep",
+            "MedHxPsychiatricSubstanceAbuse")
+
+temp <- 
+  pat %>%
+  select(subjectId, all_of(mycols))
+temp$sum <- rowSums(temp[-1], na.rm = TRUE)
+temp <- 
+  temp %>%
+  select(subjectId, sum, everything())
+temp$na <-
+  rowSums(is.na(temp[-c(1,2)]))
+temp$HxMH <- 
+  ifelse(temp$na == 7, NA,
+         ifelse(temp$sum == 0, "absent", "present"))
+temp <- 
+  temp %>%
+  select(subjectId, HxMH)
+
+pat <- merge(pat, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+```
+
+
+```{r}
+#neurobot Psychiatric questionnaires
+temp <- 
+  read.csv("Data/PsychQuestionnaires.csv", na.strings = c("", " ", "NA"))
+
+pcl5 <- 
+  read.csv("Data/PCL.csv", na.strings = c("", " ", "NA"))
+
+pcl5 <-
+  pcl5 %>% 
+  select(-Outcomes.PCL5Date)
+
+temp <- 
+  merge(temp, pcl5, by = c("subjectId", "Outcomes.Timepoint"), all.x = TRUE, all.y = FALSE)
+
+colnames(temp) <- gsub("Outcomes.", "", colnames(temp), fixed = TRUE)
+
+psych_acute <- 
+  temp %>%
+  filter(Timepoint == "Base")
+colnames(psych_acute) <- paste0("acute_", colnames(psych_acute))
+psych_acute$acute_RPQHeadaches <- 
+  ifelse(is.na(psych_acute$acute_RPQHeadaches)==TRUE, NA,
+         ifelse(psych_acute$acute_RPQHeadaches %in% c("3", "4"), "moderate-severe", "absent-mild"))
+psych_acute$acute_RPQPoorConcentration <- 
+  ifelse(is.na(psych_acute$acute_RPQPoorConcentration)==TRUE, NA,
+         ifelse(psych_acute$acute_RPQPoorConcentration %in% c("2", "3", "4"), "present", "absent"))
+psych_acute$acute_RPQLightSensitivity <- 
+  ifelse(is.na(psych_acute$acute_RPQLightSensitivity)==TRUE, NA,
+         ifelse(psych_acute$acute_RPQLightSensitivity %in% c("2", "3", "4"), "present", "absent"))
+pat <- merge(pat, psych_acute, by.x = "subjectId",by.y = "acute_subjectId",  all.x = TRUE, all.y = FALSE)
+
+psych_2wk <-
+  temp %>%
+  filter(Timepoint == "2wk")
+colnames(psych_2wk) <- paste0("wk2_", colnames(psych_2wk))
+pat <- merge(pat, psych_2wk, by.x = "subjectId",by.y ="wk2_subjectId", all.x = TRUE, all.y = FALSE)
+
+#supplement missing PTA values
+temp <-
+  pat %>%
+  select(subjectId, contains("PTA"), acute_GOATOutcome)
+temp1 <- 
+  temp %>%
+  filter(is.na(temp$LOCPTADuration)==TRUE)
+
+pat$PTAover1h <- 
+  ifelse(is.na(pat$LOCPTADuration) == FALSE, as.character(pat$LOCPTADuration),
+                ifelse(pat$InjuryHx.LOCPTA %in% c("0", "2"), "absent",
+                       ifelse(pat$Hospital.ICUDischPTAOngoing == "1", "present", 
+                            ifelse(pat$Hospital.HospDischPTAOngoing == "1", "present", 
+                                   ifelse(pat$Hospital.HospDischPTADays >0, "present",
+                                          ifelse(pat$acute_GOATOutcome == "Impaired", "present", NA))))))
+
+
+```
+```{r}
+###Add data on ASA and ISS
+temp <- 
+  read.csv("Data/ASA_ISS.csv", na.strings = c("", " ", "NA", "88"))
+colnames(temp) <- c("subjectId", "ASA", "ISS")
+temp$ASA <- ifelse(is.na(temp$ASA) == TRUE, NA, 
+                   ifelse(temp$ASA == "1", "healthy",
+                          ifelse(temp$ASA == "2", "mild disease","severe or life-threatening disease")))
+temp$ASA <- factor(temp$ASA)
+
+pat <- merge(pat, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+
+###Add data on Cause of injury
+temp <- 
+  read.csv("Data/InjuryCause.csv", na.strings = c("", " ", "NA", "88"))
+colnames(temp) <- c("subjectId", "Cause")
+temp$Cause <- ifelse(is.na(temp$Cause)==TRUE, NA,
+                     ifelse(temp$Cause %in% c("1"), "traffic",
+                            ifelse(temp$Cause %in% c("4", "5", "6"), "violence", "fall and other")))
+temp$Cause <- factor(temp$Cause)
+
+pat <- merge(pat, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+```
+
+```{r}
+#clinical data standardized with controls
+stan <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/Legacy_data/Most_uptodate_curated_data/Sophies_clinical_database_20220822.csv", na.strings = c("", " ", "NA")) 
+stan <-
+  stan %>%
+  select(subjectId = Master_subject_ID,
+         Mechanism,
+         Education)
+
+pat <- merge(pat, stan, by = "subjectId", all.x = TRUE, all.y = FALSE)
+
+#scan meta-data
+scans <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/Legacy_data/Most_uptodate_curated_data/Sophies_scan_database_20220822.csv", na.strings = c("", " ", "NA"))
+scans <- 
+  scans %>%
+  select(GUPI, Scan_ID, Days_since_injury, Category, Site, Model, Age_at_this_scan) %>%
+  group_by(GUPI) %>%
+  slice(which.min(Days_since_injury)) #pick only the first scan per patient
+
+pat <- merge(pat, scans, by.x = "subjectId", by.y = "GUPI", all.x = TRUE, all.y = FALSE)
+pat$Has_MRI <- ifelse(is.na(pat$Scan_ID) == FALSE, "yes", "no")
+pat$Has_DTI <- ifelse(pat$Scan_ID %in% fa$Scan_ID, "yes", "no")
+
+#QC data
+pat <- merge(pat, qc_all, by = "Scan_ID", all.x = TRUE, all.y = FALSE)
+
+
+#neurobot radiology reports
+rad <- read.csv("Data/Radiology_reports.csv", na.strings = c("", " ", "NA"))
+rad$Imaging.ExperimentDate <- as.Date(rad$Imaging.ExperimentDate, format = "%d/%m/%Y")
+
+ct  <-
+  rad %>%
+  filter(Imaging.Timepoint == "CT Early") %>%
+  group_by(subjectId) %>%
+  slice(which.min(Imaging.ExperimentDate)) %>%
+  select(CT_abnormality = Imaging.AnyIntracranTraumaticAbnormality, 
+         subjectId)
+
+pat <- merge(pat, ct, by = "subjectId", all.x = TRUE, all.y = FALSE)
+
+mr <-
+  rad %>%
+  filter(str_detect(Imaging.Timepoint, "MR")) %>%
+  group_by(subjectId) %>%
+  slice(which.min(Imaging.ExperimentDate)) %>%
+  ungroup() %>%
+  select(MR_abnormality = Imaging.AnyIntracranTraumaticAbnormality, 
+         MR_TAI = Imaging.TAI,
+         MR_SDH_notacute = Imaging.SubduralHematomaSubacuteChronic,
+         MR_SAH = Imaging.TraumaticSubarachnoidHemorrhage,
+         MR_EDH = Imaging.EpiduralHematoma,
+         MR_Mass = Imaging.MassLesion,
+         MR_SDH_acute = Imaging.SubduralHematomaAcute,
+         MR_Contusion = Imaging.Contusion,
+         MR_SkullFrac = Imaging.SkullFracture,
+         MR_SDH_mixed = Imaging.SubduralCollectionMixedDensity,
+         MR_Cistern = Imaging.CisternalCompression,
+         MR_Mids = Imaging.MidlineShift,
+         MR_ExtraAxH = Imaging.ExtraaxialHematoma,
+         MR_IVH = Imaging.IntraventricularHemorrhage,
+         Imaging.ExperimentId)
+mr$Scan_ID <- gsub("CTBI_", "", mr$Imaging.ExperimentId)
+
+pat <- merge(pat, mr, by = "Scan_ID", all.x = TRUE, all.y = FALSE)
+
+```
+
+```{r}
+
+#################################
+# Flowchart of patient inclusion
+#################################
+
+print(paste0("Patients recruited to CENTER-TBI: ", nrow(pat)))
+
+#only age range reflected in controls
+young <- 
+  pat %>% filter(Age < 20)
+print(paste0("Patients younger than 20: ", nrow(young)))
+old <- 
+  pat %>% filter(Age > 70)
+print(paste0("Patients older than 70: ", nrow(old)))
+
+pat <-
+  pat %>%
+  filter(Age >= 20 & Age <= 70)
+
+print(paste0("Patients aged 20 -70: ", nrow(pat)))
+
+#only mild TBI
+summary(as.factor(pat$Severity))
+
+pat <-
+  pat %>%
+  filter(Severity == "mild")
+
+print(paste0("Patients with GCS >12: ", nrow(pat)))
+
+#only normal CT
+summary(as.factor(pat$CT_abnormality))
+
+pat <- 
+  pat %>%
+  filter(CT_abnormality == "absent")
+
+print(paste0("Patients with normal CT: ", nrow(pat)))
+
+#only with MRI
+summary(as.factor(pat$Has_MRI))
+
+pat <- 
+  pat %>%
+  filter(Has_MRI == "yes")
+
+print(paste0("Patients with MRI: ", nrow(pat)))
+
+#Only with MRI within first month
+pat <- 
+  pat %>%
+  filter(Days_since_injury < 32)
+
+print(paste0("Patients with MRI WITHIN 31 days: ", nrow(pat)))
+
+
+#only with DTI
+summary(as.factor(pat$Has_DTI))
+
+pat <-
+  pat %>%
+  filter(Has_DTI == "yes")
+
+print(paste0("Patients with DTI: ", nrow(pat)))
+
+#only good quality DTI
+summary(as.factor(pat$Decision))
+
+pat <-
+  pat %>%
+  filter(is.na(Decision)==TRUE | Decision == "keep")
+
+print(paste0("Patients with good quality DTI: ", nrow(pat)))
+
+
+```
+
+
+
+```{r}
+#Combine patient and control data
+combi <- bind_rows(pat, con)
+
+#format variables
+combi$Sex <- ifelse(is.na(combi$Sex) == TRUE, NA,
+                    ifelse(combi$Sex %in% c("M", "male"), "male", "female"))
+combi$Sex <- factor(combi$Sex)
+combi$PatientType <- ifelse(combi$Category == "HEALTHY", "4", as.character(combi$PatientType))
+combi$PatientType <- factor(combi$PatientType,
+                            levels = c("1", "2", "3", "4"),
+                            labels = c("ER", "Admission", "ICU", "control"))
+combi$Recovery <- ifelse(combi$Category == "HEALTHY", "complete", as.character(combi$Recovery))
+combi$MajorEI <- ifelse(combi$Category == "HEALTHY", "absent", as.character(combi$MajorEI))
+combi$GCSScoreBaselineDerived <- ifelse(combi$Category == "HEALTHY", "15", as.character(combi$GCSScoreBaselineDerived))
+combi$GCSScoreBaselineDerived <- factor(combi$GCSScoreBaselineDerived)
+combi$MR_abnormality <- ifelse(combi$Category == "HEALTHY", "absent", as.character(combi$MR_abnormality))
+combi$Mechanism <- ifelse(combi$Category == "HEALTHY", "control", as.character(combi$Mechanism))
+combi$Time_to_scan <- ifelse(combi$Category == "HEALTHY", "control", 
+                             ifelse(combi$Days_since_injury <=3, "0-3 days",
+                                    ifelse(combi$Days_since_injury <= 14, "4-14 days", "15-31 days")))
+combi$Time_to_scan <- factor(combi$Time_to_scan,
+                             levels = c("control", "0-3 days", "4-14 days", "15-31 days"))
+combi$Site <- ifelse(combi$Site == "detect/legacy", "Site-06-a72b20", as.character(combi$Site))
+combi$MedHxPsychiatric <- factor(combi$MedHxPsychiatric,
+                                 levels = c(0, 1),
+                                 labels = c("absent", "present"))
+combi$MedHxPsychiatricDep <- factor(combi$MedHxPsychiatricDep,
+                                 levels = c(0, 1),
+                                 labels = c("absent", "present"))
+combi$InjViolenceVictimAlcohol <- factor(combi$InjViolenceVictimAlcohol,
+                                 levels = c(0, 1),
+                                 labels = c("absent", "present"))
+
+combi$Education <- factor(combi$Education,
+                          levels = c("below GCSE", "GCSE/AS/A levels equivalent", "diploma", "university degree"))
+
+combi$Divider <- ifelse(combi$Category == "TBI", "Patients", "Controls")
+combi[sapply(combi, is.character)] <- lapply(combi[sapply(combi, is.character)], 
+                                       factor)
+
+```
+
+```{r}
+########################
+#Choose procsets
+########################
+
+######start with fa#########
+combi$Machine <- paste0(combi$Site, "_", combi$Model)
+summary(as.factor(combi$Machine))
+temp <- 
+  combi %>%
+  select(subjectId, Scan_ID, Machine)
+
+
+fa <- merge(temp, fa, by = "Scan_ID", all.x = TRUE, all.y = FALSE)
+fa <-
+  fa %>%
+  unite("Scanner", c("Machine", "Series"), remove = FALSE)
+
+#display the proc_sets available per machine
+scanners <-
+  fa %>%
+  group_by(Machine, Series) %>%
+  summarise(num = n()) %>%
+  ungroup()
+
+#choose the most commonly available proc_set per machine
+scanners <-
+  scanners %>% 
+  group_by(Machine) %>%
+  slice(which.max(num)) %>%
+  ungroup() 
+
+#Exclude scanners that have only one person scanned on them
+scanners <-
+  scanners %>%
+  filter(num >1)
+
+scanners <-
+  scanners %>%
+  unite("Scanner", c("Machine", "Series"), remove = FALSE)
+
+#From imaging data, select only the chosen scanners
+fa <- 
+  fa %>%
+  filter(Scanner %in% scanners$Scanner)
+
+
+excluded <- 
+  combi %>%
+  filter(!(subjectId %in% fa$subjectId))
+
+#excludes 3 controls and 1 patient (note for flowchart)
+combi <- 
+  combi %>%
+  filter(Scan_ID %in% fa$Scan_ID)
+
+##########repeat for md###########
+temp <- 
+  combi %>%
+  select(subjectId, Scan_ID, Machine)
+
+md <- merge(temp, md, by = "Scan_ID", all.x = TRUE, all.y = FALSE)
+md <-
+  md %>%
+  unite("Scanner", c("Machine", "Series"), remove = FALSE)
+
+md <- 
+  md %>%
+  filter(Scan_ID %in% combi$Scan_ID & Scanner %in% fa$Scanner)
+
+
+```
+
+```{r}
+####################################
+#Prepare table 1 for CENTER-TBI
+####################################
+
+label(combi$Age_at_this_scan) <- "Age"
+units(combi$Age_at_this_scan) <- "years"
+label(combi$Mechanism) <- "Mechanism of injury"
+label(combi$Cause) <- "Cause of injury"
+label(combi$GCSScoreBaselineDerived) <- "Glasgow Coma Score"
+label(combi$HeadNeckAIS) <- "AIS Head"
+label(combi$MajorEI) <- "Major extracranial injury"
+label(combi$PatientType) <- "Care pathway"
+label(combi$HxMH) <- "Prior mental health problems"
+label(combi$InjViolenceVictimAlcohol) <- "Alcohol intoxication"
+label(combi$PTAover1h) <- "PTA >1h"
+label(combi$acute_RPQHeadaches) <- "Moderate or severe headache"
+label(combi$acute_RPQPoorConcentration) <- "Mild or worse difficulty concentrating"
+label(combi$acute_RPQLightSensitivity) <- "Mild or worse photophobia"
+label(combi$Time_to_scan) <- "Time to MRI"
+units(combi$Time_to_scan) <- "days"
+label(combi$MR_abnormality) <- "Radiological abnormality on MRI"
+label(combi$wk2_GAD7TotalScore) <- "2wk anxiety score (GAD)"
+label(combi$wk2_PHQ9TotlScre) <- "2wk depression score (PHQ9)"
+label(combi$wk2_RPQTotalScore) <- "2wk concussion complaints score (RPQ)"
+label(combi$acute_RPQTotalScore) <- "Acute concussion complaints score (RPQ)"
+label(combi$wk2_PCL5TotalScore) <- "2wk post-traumatic stress score (PCL-5)"
+label(combi$ISS) <- "Injury severity score"
+label(combi$ASA) <- "Pre-injury health (ASA)"
+
+
+table1 <- table1(~ Age_at_this_scan + 
+                   Sex +
+                   Education +
+                   Cause +
+                   GCSScoreBaselineDerived +
+                   ISS +
+                   PatientType +
+                   ASA +
+                   HxMH +
+                   InjViolenceVictimAlcohol +
+                   PTAover1h +
+                   acute_RPQTotalScore +
+                   acute_RPQHeadaches +
+                   acute_RPQPoorConcentration +
+                   acute_RPQLightSensitivity +
+                   Time_to_scan +
+                   MR_abnormality +
+                   wk2_GAD7TotalScore +
+                   wk2_PHQ9TotlScre +
+                   wk2_RPQTotalScore +
+                   wk2_PCL5TotalScore +
+                   Recovery | Divider,
+         data = combi, 
+         droplevels=F,
+         overall = F,
+         render.continuous = my.render.cont, 
+         render.categorical = my.render.cat)
+
+ft1 <- t1flex(table1)
+save_as_docx(ft1, path = "Figures/Table1_CENTER_withcontrols.docx")
+
+```
+```{r}
+combi_pat <-
+  combi %>%
+  filter(Category == "TBI")
+table1 <- table1(~ Age_at_this_scan + 
+                   Sex +
+                   Education +
+                   Cause +
+                   GCSScoreBaselineDerived +
+                   ISS +
+                   PatientType +
+                   ASA +
+                   HxMH +
+                   InjViolenceVictimAlcohol +
+                   PTAover1h +
+                   acute_RPQTotalScore +
+                   acute_RPQHeadaches +
+                   acute_RPQPoorConcentration +
+                   acute_RPQLightSensitivity +
+                   Time_to_scan +
+                   MR_abnormality +
+                   wk2_GAD7TotalScore +
+                   wk2_PHQ9TotlScre +
+                   wk2_RPQTotalScore +
+                   wk2_PCL5TotalScore +
+                   Recovery,
+         data = combi_pat, 
+         droplevels=F,
+         render.continuous = my.render.cont, 
+         render.categorical = my.render.cat)
+
+ft1 <- t1flex(table1)
+save_as_docx(ft1, path = "Figures/Table1_CENTER_onlypatients.docx")
+
+```
+
+
+```{r}
+#mice does not impute a value if there is only one NA per dataset
+#So I will use mean imputation for those single values
+combi$MR_abnormality <- ifelse(is.na(combi$MR_abnormality)==TRUE, "absent", as.character(combi$MR_abnormality))
+combi$Sex <- ifelse(is.na(combi$Sex)==TRUE, "male", as.character(combi$Sex))
+```
+
+```{r}
+#########################################################
+#format variables for modelling
+#in particular merge rare groups to enable bootstrapping
+#########################################################
+
+
+#Education
+combi$Education <-
+  ifelse(is.na(combi$Education)==TRUE, NA,
+         ifelse(combi$Education %in% c("below GCSE", "GCSE/AS/A levels equivalent"), "A-levels or below", as.character(combi$Education)))
+combi$Education <- factor(combi$Education)
+
+#gcs (merge 13 and 14)
+combi$GCSScoreBaselineDerived <- 
+  ifelse(is.na(combi$GCSScoreBaselineDerived)==TRUE, NA,
+         ifelse(combi$GCSScoreBaselineDerived %in% c("13", "14"), "13-14", "15"))
+combi$GCSScoreBaselineDerived <- factor(combi$GCSScoreBaselineDerived)
+
+#ais (merge 3&4)
+combi$HeadNeckAIS <- 
+  ifelse(is.na(combi$HeadNeckAIS)==TRUE, NA,
+         ifelse(combi$HeadNeckAIS %in% c("3", "4"), "3-4", as.character(combi$HeadNeckAIS)))
+combi$HeadNeckAIS <- factor(combi$HeadNeckAIS)
+
+
+```
+```{r}
+#Is there a difference in outcome between patients with and without
+#radiological abnormality on MR
+pat <- 
+  combi %>%
+  filter(Category == "TBI")
+table(pat$MR_abnormality, pat$Recovery)
+chisq.test(pat$MR_abnormality, pat$Recovery)
+
+```
+
+```{r}
+summary(combi$Days_since_injury)
+temp <- combi %>% filter(Category != "TBI") 
+
+```
+
+```{r}
+write.csv(combi, "Data/CENTER_clinical_data.csv", row.names = FALSE)
+write.csv(fa, "Data/CENTER_fa.csv", row.names = FALSE)
+write.csv(md, "Data/CENTER_md.csv", row.names = FALSE)
+```
+

@@ -1,0 +1,140 @@
+---
+title: "ggseg"
+author: "Sophie"
+date: "2023-08-22"
+output: html_document
+---
+
+
+```{r}
+# Enable this universe
+options(repos = c(
+    ggseg = 'https://ggseg.r-universe.dev',
+    CRAN = 'https://cloud.r-project.org'))
+
+# Install some packages
+library(ggsegJHU)
+library(ggseg)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggsegExtra)
+library(ggsegICBM)
+library(ggseg3d)
+library(flextable)
+```
+
+
+```{r}
+ggseg3d(atlas = icbm_3d) %>% 
+  add_glassbrain("left") %>% 
+  pan_camera("right lateral") %>%
+  remove_axes()
+```
+https://ggseg.github.io/ggseg3d/articles/ggseg3d.html
+```{r}
+#get a list of all labelled tracts available in the atlas
+icbm_3d %>% 
+  unnest(cols = ggseg_3d)
+data_template = icbm_3d %>% 
+  unnest(ggseg_3d) %>% 
+  ungroup() %>% 
+  select(region, label)
+```
+
+
+```{r}
+#get my data - one list for md and one list for fa
+mydata1 <- read.csv("Data/ICBM_data_20230825.csv")
+mydata1 <- mydata1 %>% select(-Frequency)
+mydata2 <- read.csv("Data/ICBM_data_20231103.csv")
+mydata <- merge(mydata2, mydata1, by = c("Tract", "Side", "Metric"))
+mydata <- 
+  mydata %>%
+  separate(col = "Frequency", into = c("x", "freq", "y"), sep = c("\\(|\\)"))
+mydata$freq <- gsub("%", "", mydata$freq)
+mydata <- mydata %>% select(-c(x, y, Tract, Side))
+mydata$freq <- as.numeric(mydata$freq)/100
+
+fa <- mydata %>% filter(Metric == "FA")
+md <- mydata %>% filter(Metric == "MD")
+
+fa <- merge(data_template, fa, 
+            by.x = "label", by.y = "Label", 
+            all.x = TRUE, all.y = TRUE)
+md <- merge(data_template, md, 
+            by.x = "label", by.y = "Label", 
+            all.x = TRUE, all.y = TRUE)
+
+#fa$freq <- ifelse(is.na(fa$freq)==TRUE, 0, fa$freq)
+#md$freq <- ifelse(is.na(md$freq)==TRUE, 0, md$freq)
+
+fa <- fa %>% select(-Metric)
+md <- md %>% select(-Metric)
+
+#Make a table combining fa and md data (mean of both)
+combi <- merge(fa, md, by = c("label", "region"), all.x = TRUE, all.y = TRUE)
+combi$freq <- rowSums(combi[,-c(1,2)], na.rm = TRUE)/2
+combi$freq <- ifelse(combi$freq==0, NA, combi$freq)
+```
+
+
+```{r}
+ggseg3d(.data = combi, 
+        atlas = icbm_3d,
+        colour = "freq", na.alpha = 0.15,
+        palette = c("lemonchiffon", "olivedrab3", "seagreen", "darkcyan", "dodgerblue", "darkblue"),
+        options.legend = list(title=list(text="Freq"))) %>% 
+  pan_camera("right medial") %>%
+  remove_axes() %>%
+add_glassbrain
+```
+```{r}
+#Make a prettier results table for prognostic tracts
+res <- combi
+res <- 
+  res %>%
+  filter(is.na(freq)==FALSE)
+res <- separate(res, "label", into = "side", sep = "_", remove = FALSE, extra = "drop")
+res$side <- ifelse(res$side == "lh", "left",
+                   ifelse(res$side == "rh", "right", "commissural"))
+res <-
+  res %>%
+  select("Region" = region,
+         "Hemisphere" = side,
+         "FA" = freq.x,
+         "MD" = freq.y,
+         "Mean" = freq)
+
+res$Mean <- format(round(res$Mean,2), nsmall = 2) 
+res$FA <- format(round(res$FA, 2), nsmall = 2) 
+res$FA <- gsub("NA", "-", res$FA)
+res$MD <- format(round(res$MD, 2), nsmall = 2) 
+res$MD <- gsub("NA", "-", res$MD)
+
+res <- 
+  res %>%
+  arrange(desc(Mean))
+
+
+#remove comments in paranethesis from region names
+res$Region <- gsub("\\s*\\([^\\)]+\\)","",as.character(res$Region))
+#indicate that the part of the cingulum in this list refers to the hippocampus
+res$Region <- gsub("Cingulum", "Hippocampus", res$Region)
+
+```
+```{r}
+ft <-
+  res %>%
+  regulartable() %>%
+  add_header_row(values = c("White matter region", "Frequency of selection"), 
+                 colwidths = c(2,3)) %>%
+  align(align = "right", part = "all") %>%
+    align(align = "left", j = c(1,2), part = "all") %>% 
+    padding(padding = 0, part = "all", padding.right = 3, padding.left = 3, padding.top = 3, padding.bottom = 3) %>%
+    fontsize(size = 10, part = "all")
+
+save_as_docx(ft, path = "Figures/Tracttable.docx")
+  
+```
+

@@ -1,0 +1,553 @@
+---
+title: "DTI_mildTBI"
+author: "Sophie"
+date: "2022-11-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(mice)
+library(table1)
+library(flextable)
+library(ggplot2)
+library(tidyr)
+library(neuroCombat)
+library(caret)
+library(glmnet)
+library(pROC)
+library(grid)
+library(gridExtra)
+source("DTI_mTBI_funs.R")
+
+```
+
+```{r}
+#Define parameters for running this script
+m = 10 #number of imputed datasets
+maxit = 10 #number of iterations during multiple imputation - for this data convergence observed after 10
+B = 200 #number of bootstraps for optimism correction and standard errors
+set.seed(123)
+
+```
+
+```{r}
+########################################
+# Load data
+########################################
+
+data <- read.csv("Data/CENTER_clinical_data.csv")
+fa   <- read.csv("Data/CENTER_fa.csv")
+md   <- read.csv("Data/CENTER_md.csv")
+
+```
+
+1.	From the original (incomplete) data, create 10 multiply imputed datasets, m1 to m10
+2.	Within each imputed dataset, create 200 bootstrap samples, e.g. m1_b1 to m1_b200
+3.	Within each bootstrap sample, do the lasso to calculate the DTI score and fit the models with and without DTI
+4.	Optimism-correction can now be done by testing models from m1_b1 to m1_200 on the original (un-bootstrapped) m1.
+
+
+
+```{r}
+########################################
+# Multiple imputation
+########################################
+
+data <-
+  data %>%
+  select(
+    Scan_ID,
+    subjectId,
+    Category,
+    Age_at_this_scan,
+    Sex,
+    Education,
+    Cause,
+    GCSScoreBaselineDerived,
+    ASA,
+    ISS,
+    PTAover1h,
+    acute_RPQTotalScore,
+    acute_RPQHeadaches,
+    acute_RPQPoorConcentration,
+    acute_RPQLightSensitivity,
+    wk2_GAD7TotalScore,
+    wk2_PHQ9TotlScre,
+    wk2_RPQTotalScore,
+    wk2_PCL5TotalScore,
+    PatientType,
+    Time_to_scan,
+    MR_abnormality,
+    Site,
+    Model,
+    Recovery,
+    HxMH,
+    InjViolenceVictimAlcohol,
+    MedHxPsychiatricDep)
+
+temp <-
+  fa %>%
+  select(Scan_ID, Scanner, contains("ROI"))
+
+data <-
+  merge(data, temp, by = "Scan_ID")
+
+temp <-
+  md %>%
+  select(Scan_ID, contains("ROI"))
+
+data <-
+  merge(data, temp, by = "Scan_ID")
+
+
+data[sapply(data, is.character)] <- lapply(data[sapply(data, is.character)], 
+                                       factor)
+
+#use imputation matrix to create m imputed datasets
+ini <- mice(data, maxit = 0)
+pred <- ini$pred
+pred[,"Scan_ID"] <- 0
+pred[,"subjectId"] <-0
+imp <- mice(data, 
+            print=T, 
+            m = m, 
+            maxit = maxit,
+            predictorMatrix = pred,
+            seed = 123)
+
+#check convergence
+plot(imp)
+
+#store imputations in a list
+imp_list <- vector(mode = "list", length = m)
+
+for (i in 1:m){
+  imp_list[[i]] <- complete(imp, i)
+}
+```
+
+
+```{r}
+#######################################################
+# Prepare DTI data for modelling
+#######################################################
+
+for (i in 1:length(imp_list)) {
+
+#Harmonize data from different scanners
+imp_list[[i]] <- harmonize_data(mydata = imp_list[[i]])
+
+#Adjust DTI values for age
+imp_list[[i]] <- adjust_for_age(mydata = imp_list[[i]])
+
+}
+
+#isolate patient data and make outcomes numeric
+orig_pat_list <- vector(mode = "list", length = length(imp_list))
+
+for (i in 1:length(imp_list)){
+  
+  orig_pat_list[[i]] <- 
+    imp_list[[i]] %>% 
+    filter(Category == "TBI")
+  
+  orig_pat_list[[i]]$Recovery <- 
+      ifelse(orig_pat_list[[i]]$Recovery == "incomplete", 1, 0)
+  }
+
+#scale and center dti data (as MD and FA values on different scales)
+orig_pat_list <- scale_and_center(pat_list = orig_pat_list)
+
+```
+
+
+
+```{r}
+##################################################################
+# For each of the original (un-bootstrapped) imputed datasets
+# derive the DTI score by fitting one lasso model 
+# per imputed dataset
+##################################################################
+
+#fit lasso models to identify the most prognostic ROIs
+lasso_result_orig_list <- vector(mode = "list", length = m)
+
+for (i in 1:m){
+  lasso_result_orig_list[[i]] <- 
+    select_rois(data = orig_pat_list[[i]], myoutcome = "Recovery")
+}
+
+#save lasso model objects and coefficients 
+saveRDS(lasso_result_orig_list, "RDS/lasso_result_orig_list.rds")
+
+
+#Use lasso to predict a DTI score
+# i.e. logit of probability of unfavourable outcome
+
+for (i in 1:length(orig_pat_list)) {
+  
+  newx    <- 
+    orig_pat_list[[i]] %>% 
+    select(contains("stan_adj")) %>% 
+    as.matrix()
+  
+  #score derived from original (non-bootstrapped) CENTER data
+   temp <- 
+    predict(object = lasso_result_orig_list[[i]][["model"]],
+            newx   = newx) %>%
+     as.data.frame()
+   
+   colnames(temp) <- "DTI_score"
+   
+   orig_pat_list[[i]]$DTI_score <- temp$DTI_score
+  
+}
+
+#Plot DTI score stratified by outcome
+p <- 
+  ggplot(data = bind_rows(orig_pat_list), 
+         aes(x = Recovery, 
+             y = DTI_score, 
+             group = Recovery)) +
+  geom_boxplot() +
+  ggtitle("DTI-score fit and tested on original CENTER data")
+
+p
+
+ggsave(filename = paste0("Figures/dtiscore_CENTERonCENTER_orig.pdf"), 
+         plot = p,
+         dpi = 300,
+         width = 10,
+         height = 10,
+         units = "cm")
+
+#I observe
+#1. Very good separation between complete and incomplete recovery
+#2. However overall biased with scores > 0 even for most patients with incomplete recovery
+# who should be predicted to have scores < 0 (equivalent to a probability < 0.5)
+#Sp on its own not a good prediction tool but promise as an add on to clinical data
+```
+
+
+
+```{r}
+#################################################################
+# Within each imputed dataset, create B bootstrap samples
+#################################################################
+
+
+imp_boot_data_list <- rec.list(c(m, B))
+
+for (i in 1:m) {
+  for (b in 1:B){
+    set.seed(b)
+    imp_boot_data_list[[i]][[b]]= 
+      orig_pat_list[[i]][sample(x       = rownames(orig_pat_list[[i]]), 
+                                size    = nrow(orig_pat_list[[i]]), 
+                                replace = TRUE),]
+  }
+}
+
+##################################################################
+#Within each bootstrap sample
+#do the lasso to calculate the DTI score 
+##################################################################
+
+#fit lasso models to identify the most prognostic ROIs
+imp_boot_lasso_list <- rec.list(c(m, B))
+
+for (i in 1:m) {
+  for (b in 1:B){
+    print(paste("Now working on m", i, " b", b))
+    imp_boot_lasso_list[[i]][[b]] <- 
+      select_rois(data = imp_boot_data_list[[i]][[b]], myoutcome = "Recovery")
+  }
+}
+
+
+#save lasso model objects and coefficients 
+saveRDS(imp_boot_lasso_list, "RDS/imp_boot_model_list.rds")
+
+#calculate DTI score for each patient in each bootstrap sample in each imputed dataset
+
+for (i in 1:m) {
+  for (b in 1:B){
+    
+    newx    <- 
+      imp_boot_data_list[[i]][[b]] %>% 
+      select(contains("stan_adj")) %>% 
+      as.matrix()
+    
+    #score derived from the corresponding bootstrapped data
+    temp <- 
+      predict(object = imp_boot_lasso_list[[i]][[b]][["model"]],
+              newx   = newx) %>%
+      as.data.frame()
+    
+    colnames(temp) <- "DTI_score"
+    
+    imp_boot_data_list[[i]][[b]]$DTI_score <- temp$DTI_score
+  }
+}
+
+  
+#Plot DTI score stratified by outcome
+ggplot(data = imp_boot_data_list[[2]][[1]], 
+         aes(x = Recovery, 
+             y = DTI_score, 
+             group = Recovery)) +
+  geom_boxplot() +
+  ggtitle("DTI-score fit and tested on original CENTER data")
+
+```
+```{r}
+############################################################################
+# For original data
+# fit prognostic models with and without DTI
+# derive unadjusted performance metrics 
+#(optimism-adjustment will be done later)
+############################################################################
+
+#prepare model names
+mymodels <- 
+  c( "DTI_only",            #1
+     "plain_upfrontEM",     #2
+     "plain_upfrontPLUS",   #3
+     "plain_headsmart",     #4
+     "plain_centerEM",      #5
+     "plain_centerPLUS",    #6
+     "dti_upfrontEM",       #7
+     "dti_upfrontPLUS",     #8
+     "dti_headsmart",       #9
+     "dti_centerEM",        #10
+     "dti_centerPLUS")      #11
+
+#fit models to each of the 10 imputed datasets
+orig_models_by_imp <- vector(mode = "list", length = m)
+
+for (i in 1:m) {
+  orig_models_by_imp[[i]] <- fit_mymodels(orig_pat_list[[i]], mymodels)
+}
+
+#extract coefficients for all models across the imputed datasets
+orig_coef_list              <- vector(mode = "list", length = length(mymodels))
+names(orig_coef_list)       <- mymodels
+orig_models_by_model        <- vector(mode = "list", length = length(mymodels))
+names(orig_models_by_model) <- mymodels
+
+for (i in 1:length(mymodels)) {
+  #reorganise nested list by model type
+  orig_models_by_model[[i]] <- lapply(orig_models_by_imp, `[[`, i)
+  #pool coefficients using Rubin's rules to report in paper
+  orig_coef_list[[i]]       <- pool_my_coefs(orig_models_by_model[[i]]) 
+  
+}
+
+# test model performance with and without DTI
+# in each imputed dataset of the original data
+orig_perform_list <- vector(mode = "list", length = m)
+
+for (i in 1:m){
+  orig_perform_list[[i]] <- test_mymodels(orig_pat_list[[i]], orig_models_by_imp[[i]])
+}
+
+#I am not pooling performance metrics now, only after optimism-correction
+
+saveRDS(orig_coef_list, "RDS/orig_coef_list.rds")
+```
+
+
+```{r}
+#########################################################################
+# For each bootstrap sample within each imputed dataset
+# a) use its lasso to recalculate the DTI score in the original data
+# b) fit models with and without DTI to bootstrap sample
+# c) test models from b) on bootstrap sample
+# d) test models from b) on original data
+# g) calculate optimism for this bootstrap sample
+#########################################################################
+
+#For each bootstrap sample within each imputed dataset I want to store
+# 1. mean performance of boot_models on boot_data (for SE calculation across bootstrap samples)
+# 2. optimism of performance (comparing performance of boot_models on boot_data vs on original_data)
+bootonboot_perform_list <- rec.list(c(m, B))
+bootonboot_prob_list    <- rec.list(c(m, B))
+optimism_list           <- rec.list(c(m, B))
+```
+
+
+```{r}
+for (i in 1:m){
+  
+  #select data used to recalculate the DTI score
+  newx    <- 
+    orig_pat_list[[i]] %>% 
+    select(contains("stan_adj")) %>% 
+    as.matrix()
+  
+  for (b in 1:B){
+    
+    myboot   <- imp_boot_data_list[[i]][[b]]
+    mylasso  <- imp_boot_lasso_list[[i]][[b]][["model"]]
+    
+    #a) use its lasso to recalculate the DTI score in the original data
+    temp <- 
+      predict(object = mylasso,
+              newx   = newx) %>%
+      as.data.frame()
+    
+    colnames(temp) <- "DTI_score"
+    orig_pat_list[[i]]$DTI_score <- temp$DTI_score
+    
+    
+    #b) fit models with and without DTI to bootstrap sample
+    boot_models <- fit_mymodels(imp_boot_data_list[[i]][[b]], mymodels)
+    
+    #c) test models from b) on bootstrap sample
+    bootonboot_perform_list[[i]][[b]]  <- test_mymodels(imp_boot_data_list[[i]][[b]], boot_models)[["res"]]
+    
+    #d) test models from b) on original data
+    bootonorig_perform <- test_mymodels(orig_pat_list[[i]], boot_models)[["res"]]
+    
+    #e) calculate optimism for this bootstrap sample
+    optimism_list[[i]][[b]] <- bootonboot_perform_list[[i]][[b]] - bootonorig_perform
+    
+  }
+}
+
+
+saveRDS(optimism_list, "RDS/optimism_list.rds")
+saveRDS(bootonboot_perform_list, "RDS/bootonboot_perform_list.rds")
+
+```
+
+
+
+```{r}
+###################################################################
+# Calculate optimism corrected model performance
+# for each imputed dataset
+###################################################################
+
+adj_perform_list <- vector(mode = "list", length = m)
+boot_se_list     <- vector(mode = "list", length = m)
+
+#for each imputed dataset
+for (i in 1:m) {
+
+#calculate mean optimism across bootstrap samples
+arr_opt                 <- array( unlist(optimism_list[[i]]) , 
+                                  c(nrow(optimism_list[[i]][[1]]),
+                                    ncol(optimism_list[[i]][[1]]),
+                                    B) 
+                                  )
+mean_optimism           <- apply(arr_opt, 1:2, mean)
+colnames(mean_optimism) <- colnames(optimism_list[[i]][[1]])
+rownames(mean_optimism) <- mymodels
+
+adj_perform_list[[i]]   <- orig_perform_list[[i]][["res"]] - mean_optimism
+
+#remember NOT to optimism correct R2 again, as the rms package has already done this
+adj_perform_list[[i]][, "nag"]       <- orig_perform_list[[i]][["res"]][, "nag"]
+adj_perform_list[[i]][, "delta_nag"] <- orig_perform_list[[i]][["res"]][, "delta_nag"]
+  
+#calculate standard errors
+arr_se                 <- array( unlist(bootonboot_perform_list[[i]]) , 
+                                 c(nrow(bootonboot_perform_list[[i]][[1]]),
+                                   ncol(bootonboot_perform_list[[i]][[1]]),
+                                   B) 
+                                 )
+boot_se_list[[i]]      <- apply(arr_se, 1:2, sd)
+colnames(boot_se_list[[i]]) <- colnames(bootonboot_perform_list[[i]][[1]])
+rownames(boot_se_list[[i]]) <- mymodels
+
+}
+
+#Save model objects
+saveRDS(adj_perform_list, "RDS/adj_perform_list.rds")
+saveRDS(boot_se_list, "RDS/boot_se_list.rds")
+```
+
+```{r}
+#################################################
+# Pool optimism-corrected performance estimates
+# and their standard errors
+# across the m imputed datasets
+#################################################
+pooled_results <- pool_myresults(adj_perform_list, boot_se_list, m, mymodels)
+
+
+save_result_as_pretty_table(pooled_results, "pooled_results")
+```
+```{r}
+#################################################
+# extract probabilities of incomplete recovery
+# for mxB datasets
+#################################################
+
+#extract the probabilities of incomplete recovery as calculated by each model
+#for each imputed dataset (in the original unbootstrapped data)
+prob_list <- lapply(orig_perform_list, `[[`, 2)
+prob_list <- lapply(prob_list, t)
+
+#add in a column with the corresponding observed outcome
+for (i in 1:length(prob_list)){
+  prob_list[[i]] <- cbind((orig_pat_list[[i]]$Recovery), prob_list[[i]])
+  colnames(prob_list[[i]]) <- c("Recovery", mymodels)
+  prob_list[[i]] <- as.data.frame(prob_list[[i]])
+}
+
+#save model object
+saveRDS(prob_list, "RDS/prob_list.rds")
+```
+
+
+```{r}
+#############################
+#make calibration plots
+#############################
+make_calibration_plots(prob_list, "midline_dot", midline_dot = "yes")
+make_calibration_plots(prob_list, "conventional_dot", midline_dot = "no")
+
+
+############################################
+# make panel of ROC curves
+############################################
+
+make_roc_plots(prob_list = prob_list,
+               myres = pooled_results,
+               mytitle = "midline_dot",
+               midline_dot = "yes")
+
+make_roc_plots(prob_list = prob_list,
+               myres = pooled_results,
+               mytitle = "conventional_dot",
+               midline_dot = "no")
+
+#############################################
+# make lasso summary table
+# i.e. which tracts where selected how often
+#############################################
+
+make_lasso_summary_table(imp_boot_lasso_list = imp_boot_lasso_list,
+                         lasso_result_orig_list = lasso_result_orig_list)
+
+```
+
+```{r}
+#############################################################
+# display model pooled coefficients for
+# all models with and without DTI
+# fitted to the original (imputed but not boottsrapped) data
+#############################################################
+
+save_model_coefficients(orig_coef_list)
+
+
+```
