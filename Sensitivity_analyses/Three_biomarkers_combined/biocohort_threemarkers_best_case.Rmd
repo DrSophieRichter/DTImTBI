@@ -1,0 +1,50 @@
+---
+title: "DTI_mildTBI"
+author: "Sophie"
+date: "2022-11-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(table1)
+library(flextable)
+library(mice)
+library(ggplot2)
+library(pROC)
+library(caret)
+source("../dticohort_funs.R")
+source("../biocohort_threemarkers_funs.R")
+```
+
+
+```{r}
+#Define parameters for running this script
+m = 10 #number of imputed datasets
+maxit = 10 #number of iterations during multiple imputation - for this data convergence observed after 10
+B = 200 #number of bootstraps for optimism correction and standard errors
+set.seed(123)
+
+```
+
+
+
+```{r}
+orig_pat_list <- readRDS("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Sensitivity_analyses/Missing_data/Bio_best_case/RDS_bio/orig_pat_list_GFAP.rds")
+imp_boot_data_list <- readRDS("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Sensitivity_analyses/Missing_data/Bio_best_case/RDS_bio/imp_boot_data_list.rds")
+
+```
+
+
+
+```{r}
+biomarker_megafunction_threemarkers(orig_pat_list = orig_pat_list,
+                       imp_boot_data_list = imp_boot_data_list)
+```
+
