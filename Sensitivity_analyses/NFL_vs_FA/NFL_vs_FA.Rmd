@@ -1,0 +1,198 @@
+---
+title: "NFL vs FA"
+author: "Sophie"
+date: "2024-04-19"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#load packages
+library(dplyr)
+library(ggplot2)
+library(neuroCombat)
+library(gridExtra)
+source("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Sensitivity_analyses/Missing_data/dticohort_funs.R")
+```
+```{r}
+#load data
+fa <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_fa.csv")
+fa <- 
+  fa %>%
+  select(Scan_ID, Scanner, contains("ROI"))
+
+md <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_md.csv")
+md <- 
+  md %>%
+  select(Scan_ID, contains("ROI"))
+
+dti <- 
+  merge(fa, md, by = "Scan_ID", all.x = TRUE, all.y = FALSE)
+
+colnames(dti)
+```
+```{r}
+data <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_clinical_data.csv")
+
+data <-
+  data %>%
+  select(
+    Scan_ID,
+    subjectId,
+    Category,
+    Age_at_this_scan,
+    Sex,
+    Education,
+    Cause,
+    GCSScoreBaselineDerived,
+    ASA,
+    ISS,
+    PTAover1h,
+    acute_RPQTotalScore,
+    acute_RPQHeadaches,
+    acute_RPQPoorConcentration,
+    acute_RPQLightSensitivity,
+    wk2_GAD7TotalScore,
+    wk2_PHQ9TotlScre,
+    wk2_RPQTotalScore,
+    wk2_PCL5TotalScore,
+    PatientType,
+    Time_to_scan,
+    MR_abnormality,
+    Site,
+    Model,
+    Recovery,
+    HxMH,
+    InjViolenceVictimAlcohol,
+    MedHxPsychiatricDep)
+
+dti <-
+  merge(data, dti, by = "Scan_ID")
+
+dti$Scanner <- factor(dti$Scanner)
+```
+
+```{r}
+#Harmonize data from different scanners
+dti_harm <- harmonize_data(mydata = dti)
+
+#Adjust DTI values for age
+dti_adj <- adjust_for_age(mydata = dti_harm)
+
+colnames(dti_adj)
+```
+```{r}
+#Create whole brain summary value for fa and md
+dti_adj <-
+  dti_adj %>%
+  mutate(harm_MD = rowMeans(select(., starts_with("MD_")), na.rm = TRUE)) %>%
+  mutate(harm_FA = rowMeans(select(., starts_with("FA_")), na.rm = TRUE)) %>%
+  mutate(adj_MD = rowMeans(select(., starts_with("adj_MD_")), na.rm = TRUE)) %>%
+  mutate(adj_FA = rowMeans(select(., starts_with("adj_FA_")), na.rm = TRUE)) 
+
+dti_adj <-
+  dti_adj %>%
+  select(subjectId, harm_MD, harm_FA, adj_MD, adj_FA, Age_at_this_scan)
+```
+```{r}
+overlap <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Sensitivity_analyses/Missing_data/Data/Overlap_cohort.csv")
+overlap <-
+  overlap %>%
+  select(subjectId, NFL, GFAP)
+
+combi <-
+  merge(overlap, dti_adj, by = "subjectId", all.x = TRUE, all.y = FALSE)
+```
+
+```{r}
+r <- round(cor(log(combi$NFL), combi$harm_FA), 2)
+p <- cor.test(log(combi$NFL), combi$harm_FA)$p.value
+p1 <- ggplot(combi, aes(y=log(NFL), x=harm_FA)) + 
+  geom_point() + 
+  geom_smooth(method="lm", col="black") + 
+  annotate("text", x=0.465, y=4.5, label=paste0("r = ", r), hjust=0) +
+  annotate("text", x=0.465, y=4.25, label=paste0("p = ", round(p, 3)), hjust=0) +
+  theme_classic() +
+  ggtitle("NFL vs. whole WM FA (not age-adjusted)") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "whole white matter fractional anisotropy",
+       y = "serum neurofilament light in log(pg/ml)")
+
+
+```
+```{r}
+r <- round(cor(log(combi$NFL), combi$adj_FA), 2)
+p <- cor.test(log(combi$NFL), combi$adj_FA)$p.value
+p2 <- ggplot(combi, aes(y=log(NFL), x=harm_FA)) + 
+  geom_point() + 
+  geom_smooth(method="lm", col="black") + 
+  annotate("text", x=0.465, y=4.5, label=paste0("r = ", r), hjust=0) +
+  annotate("text", x=0.465, y=4.25, label=paste0("p = ", round(p, 3)), hjust=0) +
+  theme_classic() +
+  ggtitle("NFL vs. whole WM FA (adjusted for age)") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "whole white matter fractional anisotropy",
+       y = "serum neurofilament light in log(pg/ml)")
+
+```
+
+
+
+```{r}
+r <- round(cor(log(combi$NFL), combi$harm_MD), 2)
+p <- cor.test(log(combi$NFL), combi$harm_MD)$p.value
+p3 <- ggplot(combi, aes(y=log(NFL), x=harm_MD)) + 
+  geom_point() + 
+  geom_smooth(method="lm", col="black") + 
+  annotate("text", x=0.00071, y=4.5, label=paste0("r = ", r), hjust=0) +
+  annotate("text", x=0.00071, y=4.25, label=paste0("p = ", round(p, 3)), hjust=0) +
+  theme_classic() +
+  ggtitle("NFL vs. whole WM MD (not age-adjusted)") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "whole white matter mean diffusivity",
+       y = "serum neurofilament light in log(pg/ml)")
+```
+```{r}
+r <- round(cor(log(combi$NFL), combi$adj_MD), 2)
+p <- cor.test(log(combi$NFL), combi$adj_MD)$p.value
+p4 <- ggplot(combi, aes(y=log(NFL), x=adj_MD)) + 
+  geom_point() + 
+  geom_smooth(method="lm", col="black") + 
+  annotate("text", x=0.00071, y=4.5, label=paste0("r = ", r), hjust=0) +
+  annotate("text", x=0.00071, y=4.25, label=paste0("p = ", round(p, 3)), hjust=0) +
+  theme_classic() +
+  ggtitle("NFL vs. whole WM MD (adjusted for age)") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "whole white matter mean diffusivity",
+       y = "serum neurofilament light in log(pg/ml)")
+```
+```{r}
+p5 <- grid.arrange(p1, p2, p3, p4,
+             ncol = 2)
+```
+
+```{r}
+ggsave(filename = paste0("NFL_vs_DTI.pdf"), 
+         plot = p5,
+         dpi = 300,
+         width = 20,
+         height = 18,
+         units = "cm")
+
+```
+
+```{r}
+ggsave(filename = paste0("NFL_vs_DTI.tiff"), 
+         plot = p5,
+         dpi = 300,
+         width = 20,
+         height = 18,
+         units = "cm")
+
+```
+
