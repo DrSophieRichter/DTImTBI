@@ -1,0 +1,710 @@
+---
+title: "DTI_mildTBI"
+author: "Sophie"
+date: "2022-11-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(table1)
+library(flextable)
+library(mice)
+library(ggplot2)
+library(pROC)
+library(caret)
+source("dticohort_funs.R")
+source("biocohort_funs.R")
+
+```
+
+```{r}
+##################################
+#load clinical data for patients
+##################################
+
+#neurobot clinical data - volume 1
+pat <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/Clinical_data_vol1.csv", na.strings = c("", " ", "NA", "88"))
+temp <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_inj_cause.csv", na.strings = c("", " ", "NA", "88")) 
+pat <- merge(pat, temp, by = "subjectId")
+
+colnames(pat) <- gsub("InjuryHx.", "", colnames(pat), fixed = TRUE)
+colnames(pat) <- gsub("Subject.", "", colnames(pat), fixed = TRUE)
+colnames(pat) <- gsub("MedHx.", "", colnames(pat), fixed = TRUE)
+
+pat$Severity <- ifelse(pat$GCSScoreBaselineDerived > 12, "mild", "moderate-severe")
+pat$Recovery <- ifelse(pat$GOSE3monthEndpointDerived > 7, "complete", "incomplete")
+pat$LOCPTADuration <- ifelse(pat$LOCPTADuration == "88" | is.na(pat$LOCLossOfConsciousness)==TRUE, NA,
+                             ifelse(pat$LOCPTADuration %in% c("0", "2"), "absent", "present"))
+
+
+pat$MajorEI <- ifelse(pat$PelvicGirdleAIS >= 3 |
+                          pat$UpperExtremitiesAIS >= 3 |
+                          pat$ThoracicSpineAIS >= 3 |
+                          pat$AbdomenPelvicContentsAIS >= 3 |
+                          pat$ExternaAIS >= 3 |
+                          pat$ThoraxChestAIS >= 3 |
+                          pat$LumbarSpineAIS >= 3 |
+                          pat$LowerExtremitiesAIS >= 3, "present", "absent")
+
+
+
+#Prepare Education variable
+
+temp <- pat %>%
+  filter(is.na(EduLvlUSATyp) == TRUE)
+summary(factor(temp$EduYrCt))
+summary(pat$EduLvlUSATyp)
+
+pat$Education <- 
+  ifelse(pat$EduLvlUSATyp %in% c("0", "2"), "below GCSE",
+         ifelse(pat$EduLvlUSATyp == "3", "GCSE/AS/A levels equivalent",
+                ifelse(pat$EduLvlUSATyp %in% c("1", "4"), "diploma",
+                       ifelse(pat$EduLvlUSATyp == "5", "university degree", pat$EduLvlUSATyp))))
+
+summary((pat$EduYrCt))
+summary(pat$EduLvlUSATyp)
+```
+
+
+```{r}
+pat$Education <- ifelse(is.na(pat$Education)==TRUE & pat$EduYrCt <16, "below GCSE",
+                        ifelse(is.na(pat$Education)==TRUE & pat$EduYrCt <10, "university degree", pat$Education))
+
+
+
+
+#neurobot clinical data - volume 2
+temp <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/Clinical_data_vol2.csv", na.strings = c("", " ", "NA", "88"))
+
+colnames(temp)
+```
+
+
+```{r}
+colnames(temp) <- gsub("MedHx.", "", colnames(temp), fixed = TRUE)
+
+pat <- merge(pat, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+
+mycols <- c("MedHxPsychiatric", 
+            "MedHxPsychiatricDep",
+            "MedHxPsychiatricAnx",
+            "MedHxPsychiatricOther",
+            "MedHxPsychiatricSchiz",
+            "MedHxPsychiatricSleep",
+            "MedHxPsychiatricSubstanceAbuse")
+
+temp <- 
+  pat %>%
+  select(subjectId, all_of(mycols))
+temp$sum <- rowSums(temp[-1], na.rm = TRUE)
+temp <- 
+  temp %>%
+  select(subjectId, sum, everything())
+temp$na <-
+  rowSums(is.na(temp[-c(1,2)]))
+temp$HxMH <- 
+  ifelse(temp$na == 7, NA,
+         ifelse(temp$sum == 0, "absent", "present"))
+temp <- 
+  temp %>%
+  select(subjectId, HxMH)
+
+pat <- merge(pat, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+```
+
+
+```{r}
+#neurobot Psychiatric questionnaires
+temp <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/PsychQuestionnaires.csv", na.strings = c("", " ", "NA"))
+
+pcl5 <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/PCL.csv", na.strings = c("", " ", "NA"))
+
+pcl5 <-
+  pcl5 %>% 
+  select(-Outcomes.PCL5Date)
+
+temp <- 
+  merge(temp, pcl5, by = c("subjectId", "Outcomes.Timepoint"), all.x = TRUE, all.y = FALSE)
+
+colnames(temp) <- gsub("Outcomes.", "", colnames(temp), fixed = TRUE)
+
+psych_acute <- 
+  temp %>%
+  filter(Timepoint == "Base")
+colnames(psych_acute) <- paste0("acute_", colnames(psych_acute))
+psych_acute$acute_RPQHeadaches <- 
+  ifelse(is.na(psych_acute$acute_RPQHeadaches)==TRUE, NA,
+         ifelse(psych_acute$acute_RPQHeadaches %in% c("3", "4"), "moderate-severe", "absent-mild"))
+psych_acute$acute_RPQPoorConcentration <- 
+  ifelse(is.na(psych_acute$acute_RPQPoorConcentration)==TRUE, NA,
+         ifelse(psych_acute$acute_RPQPoorConcentration %in% c("2", "3", "4"), "present", "absent"))
+psych_acute$acute_RPQLightSensitivity <- 
+  ifelse(is.na(psych_acute$acute_RPQLightSensitivity)==TRUE, NA,
+         ifelse(psych_acute$acute_RPQLightSensitivity %in% c("2", "3", "4"), "present", "absent"))
+pat <- merge(pat, psych_acute, by.x = "subjectId",by.y = "acute_subjectId",  all.x = TRUE, all.y = FALSE)
+
+psych_2wk <-
+  temp %>%
+  filter(Timepoint == "2wk")
+colnames(psych_2wk) <- paste0("wk2_", colnames(psych_2wk))
+pat <- merge(pat, psych_2wk, by.x = "subjectId",by.y ="wk2_subjectId", all.x = TRUE, all.y = FALSE)
+
+#supplement missing PTA values
+temp <-
+  pat %>%
+  select(subjectId, contains("PTA"), acute_GOATOutcome)
+temp1 <- 
+  temp %>%
+  filter(is.na(temp$LOCPTADuration)==TRUE)
+
+pat$PTAover1h <- 
+  ifelse(is.na(pat$LOCPTADuration) == FALSE, as.character(pat$LOCPTADuration),
+                ifelse(pat$InjuryHx.LOCPTA %in% c("0", "2"), "absent",
+                       ifelse(pat$Hospital.ICUDischPTAOngoing == "1", "present", 
+                            ifelse(pat$Hospital.HospDischPTAOngoing == "1", "present", 
+                                   ifelse(pat$Hospital.HospDischPTADays >0, "present",
+                                          ifelse(pat$acute_GOATOutcome == "Impaired", "present", NA))))))
+
+
+```
+```{r}
+###Add data on ASA and ISS
+temp <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/ASA_ISS.csv", na.strings = c("", " ", "NA", "88"))
+colnames(temp) <- c("subjectId", "ASA", "ISS")
+temp$ASA <- ifelse(is.na(temp$ASA) == TRUE, NA, 
+                   ifelse(temp$ASA == "1", "healthy",
+                          ifelse(temp$ASA == "2", "mild disease","severe or life-threatening disease")))
+temp$ASA <- factor(temp$ASA)
+
+pat <- merge(pat, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+
+###Add data on Cause of injury
+temp <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/InjuryCause.csv", na.strings = c("", " ", "NA", "88"))
+colnames(temp) <- c("subjectId", "Cause")
+temp$Cause <- ifelse(is.na(temp$Cause)==TRUE, NA,
+                     ifelse(temp$Cause %in% c("1"), "traffic",
+                            ifelse(temp$Cause %in% c("4", "5", "6"), "violence", "fall and other")))
+temp$Cause <- factor(temp$Cause)
+
+pat <- merge(pat, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+```
+
+```{r}
+#scan meta-data
+scans <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/Legacy_data/Most_uptodate_curated_data/Sophies_scan_database_20220822.csv", na.strings = c("", " ", "NA"))
+scans <- 
+  scans %>%
+  select(GUPI, Scan_ID, Days_since_injury, Category, Site, Model, Age_at_this_scan) %>%
+  group_by(GUPI) %>%
+  slice(which.min(Days_since_injury)) #pick only the first scan per patient
+
+pat <- merge(pat, scans, by.x = "subjectId", by.y = "GUPI", all.x = TRUE, all.y = FALSE)
+pat$Has_MRI <- ifelse(is.na(pat$Scan_ID) == FALSE, "yes", "no")
+
+
+#neurobot radiology reports
+rad <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/Radiology_reports.csv", na.strings = c("", " ", "NA"))
+rad$Imaging.ExperimentDate <- as.Date(rad$Imaging.ExperimentDate, format = "%d/%m/%Y")
+
+ct  <-
+  rad %>%
+  filter(Imaging.Timepoint == "CT Early") %>%
+  group_by(subjectId) %>%
+  slice(which.min(Imaging.ExperimentDate)) %>%
+  select(CT_abnormality = Imaging.AnyIntracranTraumaticAbnormality, 
+         subjectId)
+
+pat <- merge(pat, ct, by = "subjectId", all.x = TRUE, all.y = FALSE)
+
+mr <-
+  rad %>%
+  filter(str_detect(Imaging.Timepoint, "MR")) %>%
+  group_by(subjectId) %>%
+  slice(which.min(Imaging.ExperimentDate)) %>%
+  ungroup() %>%
+  select(MR_abnormality = Imaging.AnyIntracranTraumaticAbnormality, 
+         MR_TAI = Imaging.TAI,
+         MR_SDH_notacute = Imaging.SubduralHematomaSubacuteChronic,
+         MR_SAH = Imaging.TraumaticSubarachnoidHemorrhage,
+         MR_EDH = Imaging.EpiduralHematoma,
+         MR_Mass = Imaging.MassLesion,
+         MR_SDH_acute = Imaging.SubduralHematomaAcute,
+         MR_Contusion = Imaging.Contusion,
+         MR_SkullFrac = Imaging.SkullFracture,
+         MR_SDH_mixed = Imaging.SubduralCollectionMixedDensity,
+         MR_Cistern = Imaging.CisternalCompression,
+         MR_Mids = Imaging.MidlineShift,
+         MR_ExtraAxH = Imaging.ExtraaxialHematoma,
+         MR_IVH = Imaging.IntraventricularHemorrhage,
+         Imaging.ExperimentId)
+mr$Scan_ID <- gsub("CTBI_", "", mr$Imaging.ExperimentId)
+
+pat <- merge(pat, mr, by = "Scan_ID", all.x = TRUE, all.y = FALSE)
+
+```
+```{r}
+#Prepare biomarker data
+time <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_timeofinj_data.csv", na.strings = c("", " ", "NA"))
+
+time$Date_inj <- "1970-01-01"
+time$Date_Time_inj <- as.POSIXct(paste(time$Date_inj, time$Subject.TimeInj), format="%Y-%m-%d %H:%M:%S")
+time <- 
+  time %>% 
+  select(subjectId,
+         Date_Time_inj)
+
+
+
+bio <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_biomarker_data.csv", na.strings = c("", " ", "NA"))
+bio$Date_Time_bio <- as.POSIXct(paste(bio$Biomarkers.CollectionDate, bio$Biomarkers.CollectionTime), format="%d/%m/%Y %H:%M:%S")
+colnames(bio) <- gsub("Biomarkers.", "", colnames(bio), fixed = TRUE)
+bio <- 
+  bio %>%
+  select(subjectId,
+         Date_Time_bio,
+         GFAP, 
+         NFL,
+         NSE,
+         S100B,
+         Tau,
+         UCH.L1) %>%
+  group_by(subjectId) %>% 
+  filter(is.na(Date_Time_bio)==FALSE) 
+
+bio <- merge(bio, time, by = "subjectId", all.x = TRUE, all.y = FALSE)
+bio$Time_to_bio <- difftime(bio$Date_Time_bio, bio$Date_Time_inj, units = "hours")
+bio$Time_to_bio <- abs(as.numeric(bio$Time_to_bio))
+
+#Now select only one - the first - biomarker sample per patient
+bio <-
+  bio %>%
+  group_by(subjectId) %>%
+  slice(which.min(Time_to_bio)) %>%
+  ungroup()
+
+pat <- merge(pat, bio, by = "subjectId", all.x = TRUE, all.y = TRUE)
+
+```
+
+
+```{r}
+###################
+#format variables
+###################
+
+pat$Sex <- ifelse(is.na(pat$Sex) == TRUE, NA,
+                    ifelse(pat$Sex %in% c("M", "male"), "male", "female"))
+pat$Sex <- factor(pat$Sex)
+
+pat$PatientType <- factor(pat$PatientType,
+                            levels = c("1", "2", "3"),
+                            labels = c("ER", "Admission", "ICU"))
+
+pat$GCSScoreBaselineDerived <- factor(pat$GCSScoreBaselineDerived)
+
+summary(factor(pat$MR_abnormality))
+
+pat$MedHxPsychiatric <- factor(pat$MedHxPsychiatric,
+                                 levels = c(0, 1),
+                                 labels = c("absent", "present"))
+pat$MedHxPsychiatricDep <- factor(pat$MedHxPsychiatricDep,
+                                 levels = c(0, 1),
+                                 labels = c("absent", "present"))
+pat$InjViolenceVictimAlcohol <- factor(pat$InjViolenceVictimAlcohol,
+                                 levels = c(0, 1),
+                                 labels = c("absent", "present"))
+
+pat$Education <- factor(pat$Education,
+                          levels = c("below GCSE", "GCSE/AS/A levels equivalent", "diploma", "university degree"))
+
+pat[sapply(pat, is.character)] <- lapply(pat[sapply(pat, is.character)], 
+                                       factor)
+
+
+write.csv(pat, "Data/All_CENTER_data.csv", row.names = FALSE)
+
+```
+
+```{r}
+#Add Time-to-scan data for DTI sub-cohort
+dti <- 
+  read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_clinical_data.csv", na.strings = c("", " ", "NA"))
+dti <-
+  dti %>% 
+  select(subjectId, 
+         Time_to_scan,
+         Has_DTI,
+         Decision) %>%
+  filter(Time_to_scan != "control")
+pat <- 
+  merge(pat, dti, by = "subjectId", all.x = TRUE, all.y = FALSE)
+colnames(dti)
+  
+```
+
+```{r}
+#######################################
+# Make branched inclusion flowchart
+# showing all cohorts
+#######################################
+
+paste0("Patients recruited to CENTER-TBI: ", nrow(pat))
+
+#Select only patients with mild TBI
+num <- pat %>% filter(is.na(GCSScoreBaselineDerived)==TRUE) %>% nrow()
+paste0("Patients missing GCS: ", num)
+num <- pat %>% filter(!(GCSScoreBaselineDerived %in% c("13", "14", "15"))) %>% nrow()
+paste0("Patients with GCS <13: ", num)
+pat <- pat %>% filter(GCSScoreBaselineDerived %in% c("13", "14", "15"))
+paste0("Patients with GCS >12: ", nrow(pat))
+
+#Select only patients with normal CT
+num <- pat %>% filter(is.na(CT_abnormality)==TRUE) %>% nrow()
+paste0("Patients missing CT report: ", num)
+num <- pat %>% filter(CT_abnormality == "uninterpretable") %>% nrow()
+paste0("Patients with uninterpretable CT: ", num)
+num <- pat %>% filter(CT_abnormality == "present") %>% nrow()
+paste0("Patients with abnormal CT: ", num)
+pat <- pat %>% filter(CT_abnormality == "absent")
+paste0("Patients normal CT: ", nrow(pat))
+
+#Select only adults
+num <- pat %>% filter(is.na(Age)==TRUE) %>% nrow()
+paste0("Patients missing Age: ", num)
+num <- pat %>% filter(Age <18) %>% nrow()
+paste0("Patients with Age <18: ", num)
+pat <- pat %>% filter(Age >=18)
+paste0("Patients with Age >=18: ", nrow(pat))
+```
+
+
+```{r}
+##########Biomarker subcohort
+
+#Biomarkers within 24h
+num <- pat %>% filter(is.na(GFAP)==TRUE) %>% nrow()
+paste0("Patients missing biomarker data: ", num)
+num <- pat %>% filter(is.na(GFAP)==FALSE & Time_to_bio >24) %>% nrow()
+paste0("Patients biomarker data sampled >24h: ", num)
+bio <- pat %>% filter(is.na(GFAP)==FALSE & Time_to_bio <=24)
+paste0("Patients biomarker data sampled <=24h: ", nrow(bio))
+```
+```{r}
+###########DTI subcohort
+
+#only age range reflected in controls
+young <- 
+  pat %>% filter(Age < 20)
+print(paste0("Patients younger than 20: ", nrow(young)))
+old <- 
+  pat %>% filter(Age > 70)
+print(paste0("Patients older than 70: ", nrow(old)))
+
+dti <-
+  pat %>%
+  filter(Age >= 20 & Age <= 70)
+
+print(paste0("Patients aged 20 -70: ", nrow(dti)))
+
+#only with MRI
+summary(as.factor(dti$Has_MRI))
+
+dti <- 
+  dti %>%
+  filter(Has_MRI == "yes")
+
+print(paste0("Patients with MRI: ", nrow(dti)))
+
+#Only with MRI within first month
+dti <- 
+  dti %>%
+  filter(Days_since_injury < 32)
+
+print(paste0("Patients with MRI WITHIN 31 days: ", nrow(dti)))
+
+
+#only with DTI
+summary(as.factor(dti$Has_DTI))
+
+dti <-
+  dti %>%
+  filter(Has_DTI == "yes")
+
+print(paste0("Patients with DTI: ", nrow(dti)))
+
+#only good quality DTI
+summary(as.factor(dti$Decision))
+
+dti <-
+  dti %>%
+  filter(is.na(Decision)==TRUE | Decision == "keep")
+
+print(paste0("Patients with good quality DTI: ", nrow(dti)))
+
+```
+```{r}
+##########Overlap cohort
+overlap <- 
+  pat %>%
+  filter(subjectId %in% bio$subjectId &
+           subjectId %in% dti$subjectId)
+
+print(paste0("Patients with DTI and Biomarkers: ", nrow(overlap)))
+
+summary(overlap$Recovery)
+```
+
+
+```{r}
+##########################################
+# Prepare to make
+#a table comparing patients with 
+# and without missing data
+# for each cohort
+##########################################
+
+dti_complete <- 
+  dti %>% 
+  select(subjectId,
+         Age,
+         Sex,
+         Education,
+         ASA,
+         HxMH,
+         Cause,
+         GCSScoreBaselineDerived,
+         ISS,
+         PatientType,
+         InjViolenceVictimAlcohol,
+         PTAover1h,
+         Time_to_scan,
+         acute_RPQTotalScore,
+         acute_RPQHeadaches,
+         acute_RPQPoorConcentration,
+         acute_RPQLightSensitivity,
+         wk2_GAD7TotalScore,
+         wk2_PHQ9TotlScre,
+         wk2_RPQTotalScore,
+         wk2_PCL5TotalScore,
+         Recovery) %>%
+  na.omit()
+
+dti$Cohort2 <-
+  ifelse(dti$subjectId %in% dti_complete$subjectId, "DTI cohort - complete data", "DTI cohort - missing data")
+
+bio_complete <- 
+  bio %>% 
+  select(subjectId,
+         Age,
+         Sex,
+         Education,
+         ASA,
+         HxMH,
+         Cause,
+         GCSScoreBaselineDerived,
+         ISS,
+         PatientType,
+         InjViolenceVictimAlcohol,
+         PTAover1h,
+         Time_to_bio,
+         acute_RPQTotalScore,
+         acute_RPQHeadaches,
+         acute_RPQPoorConcentration,
+         acute_RPQLightSensitivity,
+         wk2_GAD7TotalScore,
+         wk2_PHQ9TotlScre,
+         wk2_RPQTotalScore,
+         wk2_PCL5TotalScore,
+         Recovery) %>%
+  na.omit()
+
+bio$Cohort2 <-
+  ifelse(bio$subjectId %in% bio_complete$subjectId, "Biomarker cohort - complete data", "Biomarker cohort - missing data")
+
+
+overlap_complete <- 
+  bio %>% 
+  select(subjectId,
+         Age,
+         Sex,
+         Education,
+         ASA,
+         HxMH,
+         Cause,
+         GCSScoreBaselineDerived,
+         ISS,
+         PatientType,
+         InjViolenceVictimAlcohol,
+         PTAover1h,
+         Time_to_bio,
+         Time_to_scan,
+         acute_RPQTotalScore,
+         acute_RPQHeadaches,
+         acute_RPQPoorConcentration,
+         acute_RPQLightSensitivity,
+         wk2_GAD7TotalScore,
+         wk2_PHQ9TotlScre,
+         wk2_RPQTotalScore,
+         wk2_PCL5TotalScore,
+         Recovery) %>%
+  na.omit()
+
+overlap$Cohort2 <-
+  ifelse(overlap$subjectId %in% overlap_complete$subjectId, "Overlap cohort - complete data", "Overlap cohort - missing data")
+
+summary(as.factor(overlap$Cohort2))
+
+overlap$subjectId %in% overlap_complete$subjectId
+```
+
+
+```{r}
+####To create Table 1 by cohort, combine cohorts into 1 dataframe
+
+pat$Cohort <- "All adults with mTBI and normal CT"
+dti$Cohort <- "DTI cohort"
+bio$Cohort <- "Biomarker cohort"
+overlap$Cohort <- "Overlap cohort"
+
+combi <- bind_rows(pat, dti, bio, overlap)
+
+combi$GCSScoreBaselineDerived <- droplevels(combi$GCSScoreBaselineDerived)
+
+combi$Time_to_scan <- factor(combi$Time_to_scan,
+                             levels = c("0-3 days", "4-14 days", "15-31 days"),
+                             labels = c("0-3", "4-14", "15-31"))
+```
+
+
+
+```{r}
+#######################################
+# Make a table 1
+#######################################
+
+units(combi$Age) <- "years"
+label(combi$GCSScoreBaselineDerived) <- "Glasgow Coma Score"
+label(combi$HeadNeckAIS) <- "AIS Head"
+label(combi$MajorEI) <- "Major extracranial injury"
+label(combi$PatientType) <- "Care pathway"
+label(combi$HxMH) <- "Prior mental health problems"
+label(combi$InjViolenceVictimAlcohol) <- "Alcohol intoxication"
+label(combi$PTAover1h) <- "PTA >1h"
+label(combi$acute_RPQHeadaches) <- "Moderate or severe headache"
+label(combi$acute_RPQPoorConcentration) <- "Mild or worse difficulty concentrating"
+label(combi$acute_RPQLightSensitivity) <- "Mild or worse photophobia"
+label(combi$wk2_GAD7TotalScore) <- "2wk anxiety score (GAD)"
+label(combi$wk2_PHQ9TotlScre) <- "2wk depression score (PHQ9)"
+label(combi$wk2_RPQTotalScore) <- "2wk concussion complaints score (RPQ)"
+label(combi$acute_RPQTotalScore) <- "Acute concussion complaints score (RPQ)"
+label(combi$wk2_PCL5TotalScore) <- "2wk post-traumatic stress score (PCL-5)"
+label(combi$ISS) <- "Injury severity score"
+label(combi$ASA) <- "Pre-injury health (ASA)"
+label(combi$Time_to_bio) <- "Time to biomarker"
+units(combi$Time_to_bio) <- "hours"
+label(combi$Time_to_scan) <- "Time to MRI"
+units(combi$Time_to_scan) <- "days"
+
+#set up display of missing variables
+# Custom function to render missing values
+render.missing <- function(x, ..., newlabel="missing") {
+    setNames(render.missing.default(x, ...), newlabel)
+}
+
+table1 <- table1(~ Age + 
+                   Sex +
+                   Education +
+                   ASA +
+                   HxMH +
+                   Cause +
+                   GCSScoreBaselineDerived +
+                   ISS +
+                   PatientType +
+                   InjViolenceVictimAlcohol +
+                   PTAover1h +
+                   Time_to_bio +
+                   Time_to_scan + 
+                   acute_RPQTotalScore +
+                   acute_RPQHeadaches +
+                   acute_RPQPoorConcentration +
+                   acute_RPQLightSensitivity +
+                   wk2_GAD7TotalScore +
+                   wk2_PHQ9TotlScre +
+                   wk2_RPQTotalScore +
+                   wk2_PCL5TotalScore +
+                   Recovery | Cohort,
+         data = combi, 
+         droplevels=T,
+         overall = F,
+         render.continuous = my.render.cont, 
+         render.categorical = my.render.cat,
+         render.missing = render.missing)
+
+ft1 <- t1flex(table1)
+save_as_docx(ft1, path = "Tables/Table1_CENTER_all.docx")
+
+```
+
+```{r}
+#############################################################
+# Make a table comparing patients with and 
+# without missing data
+# by cohort
+#############################################################
+
+combi2 <- 
+  combi %>%
+  filter(Cohort != "All adults with mTBI and normal CT")
+
+table1 <- table1(~ Age + 
+                   Sex +
+                   Education +
+                   ASA +
+                   HxMH +
+                   Cause +
+                   GCSScoreBaselineDerived +
+                   ISS +
+                   PatientType +
+                   InjViolenceVictimAlcohol +
+                   PTAover1h +
+                   Time_to_bio +
+                   Time_to_scan + 
+                   acute_RPQTotalScore +
+                   acute_RPQHeadaches +
+                   acute_RPQPoorConcentration +
+                   acute_RPQLightSensitivity +
+                   wk2_GAD7TotalScore +
+                   wk2_PHQ9TotlScre +
+                   wk2_RPQTotalScore +
+                   wk2_PCL5TotalScore +
+                   Recovery | Cohort2,
+         data = combi2, 
+         droplevels=T,
+         overall = F,
+         render.continuous = my.render.cont, 
+         render.categorical = my.render.cat,
+         render.missing = render.missing)
+
+ft1 <- t1flex(table1)
+save_as_docx(ft1, path = "Tables/Missing_data_comparison.docx")
+
+```
+
+```{r}
+#Save GUPIs of overlap cohort
+write.csv(overlap, "Data/Overlap_cohort.csv", row.names = FALSE)
+```
+
