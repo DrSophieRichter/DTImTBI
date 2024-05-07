@@ -1,0 +1,318 @@
+---
+title: "DTI_mTBI_Biomarkers"
+author: "Sophie"
+date: "2023-06-29"
+output: html_document
+---
+
+#Can we reduce the number of MRIs we do by using biomarkers?
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#load packages
+library(OptimalCutpoints)
+library(dplyr)
+library(stringr)
+library(table1)
+library(flextable)
+library(ggplot2)
+library(tidyr)
+library(grid)
+library(gridExtra)
+  source("dticohort_NNT_funs.R")
+
+set.seed(123)
+
+#load clinical data
+data <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_clinical_data.csv")
+
+```
+```{r}
+#Prepare biomarker data
+time <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_timeofinj_data.csv", na.strings = c("", " ", "NA"))
+
+time$Date_inj <- "1970-01-01"
+time$Date_Time_inj <- as.POSIXct(paste(time$Date_inj, time$Subject.TimeInj), format="%Y-%m-%d %H:%M:%S")
+time <- 
+  time %>% 
+  select(subjectId,
+         Date_Time_inj)
+
+
+
+bio <- read.csv("/Users/sophierichter/Documents/Medicine/PhD/DTI_mTBI/Data/CENTER_biomarker_data.csv", na.strings = c("", " ", "NA"))
+bio$Date_Time_bio <- as.POSIXct(paste(bio$Biomarkers.CollectionDate, bio$Biomarkers.CollectionTime), format="%d/%m/%Y %H:%M:%S")
+colnames(bio) <- gsub("Biomarkers.", "", colnames(bio), fixed = TRUE)
+bio <- 
+  bio %>%
+  select(subjectId,
+         Date_Time_bio,
+         GFAP, 
+         S100B,
+         NFL) %>%
+  group_by(subjectId) %>% 
+  filter(is.na(Date_Time_bio)==FALSE) %>%
+  filter(subjectId %in% data$subjectId)
+
+
+bio <- merge(bio, time, by = "subjectId", all.x = TRUE, all.y = FALSE)
+bio$Time_to_bio <- difftime(bio$Date_Time_bio, bio$Date_Time_inj, units = "hours")
+bio$Time_to_bio <- abs(as.numeric(bio$Time_to_bio))
+
+temp <- 
+  data %>%
+  select(subjectId, Time_to_scan, Recovery)
+bio <-
+  merge(bio, temp, by = "subjectId", all.x = TRUE, all.y = FALSE)
+bio$Time_to_bio_cat <-
+  ifelse(bio$Time_to_bio <= 96, "0-3 days",
+         ifelse(bio$Time_to_bio < 359, "4-14 days", "15-31 days"))
+```
+
+
+```{r}
+
+#get patients who had biomarkers sampled within 24h (GFAP, S100B)
+bio24 <- 
+  bio %>% 
+  filter(Time_to_bio <= 24) %>%
+  group_by(subjectId) %>%
+  slice(which.min(Date_Time_bio)) %>%
+  select(subjectId, 
+         Time_to_bio_24 = Time_to_bio,
+         GFAP_24 = GFAP,
+         S100B_24 = S100B,
+         NFL_24 = NFL,
+         Recovery)
+#One person missing recovery data
+bio24 <-
+  bio24 %>% filter(is.na(Recovery)==FALSE)
+
+
+
+#Repeat for 24h GFAP and S100B
+label(bio24$Time_to_bio_24) <- "Time to sample taken in ED"
+units(bio24$Time_to_bio_24) <- "hours"
+label(bio24$GFAP_24) <- "GFAP"
+units(bio24$GFAP_24) <- "ng/ml"
+label(bio24$S100B_24) <- "S100B"
+units(bio24$S100B_24) <- "ng/ml"
+label(bio24$NFL_24) <- "NFL"
+units(bio24$NFL_24) <- "pg/ml"
+table1 <- table1(~ Time_to_bio_24 +
+                   GFAP_24 +
+                   NFL_24 +
+                   S100B_24| Recovery,
+         data = bio24, 
+         droplevels=F,
+         overall = F,
+         render.continuous = my.render.cont, 
+         render.categorical = my.render.cat)
+
+ftbio <- t1flex(table1)
+save_as_docx(ftbio, path = "Figures/Biotable_24h.docx")
+
+
+
+```
+```{r}
+#check who is missing initial biomarker data
+temp <- 
+  bio %>%
+  filter(!(subjectId %in% bio24$subjectId))
+temp <- 
+  temp %>%
+  group_by(subjectId) %>%
+  slice(which.min(Time_to_bio))
+```
+
+
+```{r}
+bio24 <-
+  bio24 %>%
+  ungroup() %>%
+  as.data.frame()
+
+```
+
+```{r}
+summary(bio24$Time_to_bio_24)
+```
+
+
+```{r}
+#To subdivide within 24h, I use 12h as a cutoff to have approx dame number of samples in each category
+bio24$Time_to_bio_24_bin <- ifelse(bio24$Time_to_bio_24 <= 12, "a", "b")
+
+```
+
+
+```{r}
+
+#use raw and log transformed values
+#Could try to time adjust by using a categorical variable of time windows
+mythresholds <- c("1", "0.95", "0.9", "0.8")
+mycut_list_GFAP <- vector(mode = "list", length = length(mythresholds))
+mycut_list_S100B <- vector(mode = "list", length = length(mythresholds))
+mycut_list_NFL <- vector(mode = "list", length = length(mythresholds))
+
+for (i in 1:length(mythresholds)){
+  mycut_list_GFAP[[i]] <- optimal.cutpoints(GFAP_24 ~ Recovery, data = bio24, 
+                                 methods = "MinValueSe",
+                                 tag.healthy = "complete", 
+                                 direction = "<",
+                                 categorical.cov = "Time_to_bio_24_bin",
+                           control = control.cutpoints(valueSe = mythresholds[[i]],
+                                                       ci.SeSp = "RubinSchenker",
+                                                       ci.PV = "RubinSchenker",
+                                                       ci.DLR = "Transformed"),
+                           ci.fit = TRUE)
+  
+  mycut_list_S100B[[i]] <- optimal.cutpoints(S100B_24 ~ Recovery, data = bio24, 
+                                 methods = "MinValueSe",
+                                 tag.healthy = "complete", 
+                                 direction = "<",
+                                 categorical.cov = "Time_to_bio_24_bin",
+                           control = control.cutpoints(valueSe = mythresholds[[i]],
+                                                       ci.SeSp = "RubinSchenker",
+                                                       ci.PV = "RubinSchenker",
+                                                       ci.DLR = "Transformed"),
+                           ci.fit = TRUE)
+  
+  mycut_list_NFL[[i]] <- optimal.cutpoints(NFL_24 ~ Recovery, data = bio24, 
+                                 methods = "MinValueSe",
+                                 tag.healthy = "complete", 
+                                 direction = "<",
+                                 categorical.cov = "Time_to_bio_24_bin",
+                           control = control.cutpoints(valueSe = mythresholds[[i]],
+                                                       ci.SeSp = "RubinSchenker",
+                                                       ci.PV = "RubinSchenker",
+                                                       ci.DLR = "Transformed"),
+                           ci.fit = TRUE)
+}
+
+```
+
+
+```{r}
+
+get_bio_performance <- function(mycut, data, myvar) {
+  
+  if (myvar %in% c("GFAP_24", "S100B_24", "NFL_24")){
+    mysource_a <- 
+      data %>%
+      filter(Time_to_bio_24_bin == "a")
+    mysource_b <- 
+      data %>%
+      filter(Time_to_bio_24_bin == "b")
+  } else if (myvar == "NFL_scan"){
+    mysource_a <- 
+      data %>%
+      filter(Time_to_bio_scan_bin == "a")
+    mysource_b <- 
+      data %>%
+      filter(Time_to_bio_scan_bin == "b")
+  } else {
+    print("Please select valid myvar, NFL_24 or NFL_scan")
+  }
+  
+  s <- summary(mycut)
+  tab_a <-  format_tab(s$p.table$a$MinValueSe[[1]], mysource = mysource_a, myvar)
+  tab_a$Time <- "a"
+  tab_b <-  format_tab(s$p.table$b$MinValueSe[[1]], mysource = mysource_b, myvar)
+  tab_b$Time <- "b"
+  
+  tab <- bind_rows(tab_a, tab_b)
+  tab <- tab %>% select(Time, everything())
+
+}
+
+
+```
+
+
+```{r}
+mycut_table_GFAP <- 
+  lapply(mycut_list_GFAP, get_bio_performance, data=bio24, myvar="GFAP_24") %>%
+  bind_rows()
+mycut_table_GFAP$Thresholds <- rep(mythresholds, each = 2) #two time windows per threshold
+mycut_table_GFAP$Sample <- "GFAP"
+mycut_table_GFAP <-
+  mycut_table_GFAP %>%
+  select(Sample, Time, Thresholds, everything())
+
+mycut_table_GFAP$Time <- ifelse(mycut_table_GFAP$Time == "a", "<12h", "12-24h")
+
+mycut_table_GFAP
+```
+```{r}
+mycut_table_S100B <- 
+  lapply(mycut_list_S100B, get_bio_performance, data=bio24, myvar="S100B_24") %>%
+  bind_rows()
+mycut_table_S100B$Thresholds <- rep(mythresholds, each = 2) #two time windows per threshold
+mycut_table_S100B$Sample <- "S100B"
+mycut_table_S100B <-
+  mycut_table_S100B %>%
+  select(Sample, Time, Thresholds, everything())
+
+mycut_table_S100B$Time <- ifelse(mycut_table_S100B$Time == "a", "<12h", "12-24h")
+
+mycut_table_S100B
+```
+
+```{r}
+mycut_table_NFL <- 
+  lapply(mycut_list_NFL, get_bio_performance, data=bio24, myvar="NFL_24") %>%
+  bind_rows()
+mycut_table_NFL$Thresholds <- rep(mythresholds, each = 2) #two time windows per threshold
+mycut_table_NFL$Sample <- "NFL"
+mycut_table_NFL <-
+  mycut_table_NFL %>%
+  select(Sample, Time, Thresholds, everything())
+
+mycut_table_NFL$Time <- ifelse(mycut_table_NFL$Time == "a", "<12h", "12-24h")
+
+mycut_table_NFL
+```
+
+
+```{r}
+#make a long version for the appendix
+mycut_table <- bind_rows(mycut_table_GFAP, mycut_table_S100B, mycut_table_NFL)
+mycut_table
+
+ft <- 
+  mycut_table %>%
+  regulartable %>%
+  set_header_labels("Thresholds" = "T",
+                    "cutoff" = "Cutoff",
+                    "Se" = "Sens",
+                    "Sp" = "Spec",
+                    "Avoided" = "Avoided MRIs",
+                    "NNS" = "Number needed to scan")
+
+save_as_docx(ft, path = "Figures/biomarker_performance_bytime.docx")
+
+#make a shorter version showing only results for threshold 0.9
+mycut_table_short <- 
+  mycut_table %>%
+  filter(Thresholds == "0.9") %>%
+  select(-Thresholds)
+
+ft <- 
+  mycut_table_short %>%
+  regulartable %>%
+  set_header_labels("Thresholds" = "Threshold",
+                    "cutoff" = "Cutoff",
+                    "Se" = "Sensitivity",
+                    "Sp" = "Specificity",
+                    "Avoided" = "Avoided MRIs",
+                    "FP" = "Unnecessary MRIs",
+                    "FN" = "Missed incomplete recoveries",
+                    "NNS" = "Number needed to scan")
+
+save_as_docx(ft, path = "Figures/biomarker_performance_bytime_short.docx")
+```
